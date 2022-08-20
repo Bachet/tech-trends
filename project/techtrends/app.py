@@ -30,11 +30,22 @@ def get_post(post_id):
 def calculate_metrics() -> dict:
     connection = get_db_connection()
     post_count = connection.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
+    connection.close()
     return {"db_connection_count": DB_CONNECTION_COUNTER, "post_count": post_count}
 
 
 def get_current_ts() -> str:
     return datetime.strftime(datetime.now(), '%d/%b/%Y %H:%M:%S')
+
+
+def validate_db_connection() -> bool:
+    try:
+        connection = get_db_connection()
+        connection.execute("SELECT * FROM posts").fetchall()
+        connection.close()
+    except sqlite3.OperationalError:
+        return False
+    return True
 
 
 # Define the Flask application
@@ -45,23 +56,32 @@ app.config["SECRET_KEY"] = "your secret key"
 # Define the health route of the web application
 @app.route("/healthz")
 def healthz():
-    return app.response_class(
-        response=json.dumps({"result": "OK - healthy"}), status=200, mimetype="application/json"
-    )
+    if not validate_db_connection():
+        return app.response_class(response=json.dumps({"result": "Unhealthy"}), status=500, mimetype="application/json")
+    else:
+        return app.response_class(
+            response=json.dumps({"result": "OK - healthy"}), status=200, mimetype="application/json"
+        )
 
 
 # Define the main route of the web application
 @app.route("/")
 def index():
-    connection = get_db_connection()
-    posts = connection.execute("SELECT * FROM posts").fetchall()
-    connection.close()
+    try:
+        connection = get_db_connection()
+        posts = connection.execute("SELECT * FROM posts").fetchall()
+        connection.close()
+    except sqlite3.OperationalError:
+        return app.response_class(response=json.dumps({"result": "DB error"}), status=500, mimetype="application/json")
     return render_template("index.html", posts=posts)
 
 
 @app.route("/metrics")
 def metrics():
-    metrics = calculate_metrics()
+    try:
+        metrics = calculate_metrics()
+    except sqlite3.OperationalError:
+        return app.response_class(response=json.dumps({"result": "DB error"}), status=500, mimetype="application/json")
     response = app.response_class(
             response=json.dumps({"status": "success", "code": 0, "data": metrics}),
             status=200,
@@ -75,7 +95,10 @@ def metrics():
 # If the post ID is not found a 404 page is shown
 @app.route("/<int:post_id>")
 def post(post_id):
-    post = get_post(post_id)
+    try:
+        post = get_post(post_id)
+    except sqlite3.OperationalError:
+        return app.response_class(response=json.dumps({"result": "DB error"}), status=500, mimetype="application/json")
     if post is None:
         app.logger.info(f"[{get_current_ts()}] The requested article #{post_id} does not exist!")
         return render_template("404.html"), 404
@@ -101,10 +124,17 @@ def create():
         if not title:
             flash("Title is required!")
         else:
-            connection = get_db_connection()
-            connection.execute("INSERT INTO posts (title, content) VALUES (?, ?)", (title, content))
-            connection.commit()
-            connection.close()
+            try:
+                connection = get_db_connection()
+                connection.execute("INSERT INTO posts (title, content) VALUES (?, ?)", (title, content))
+                connection.commit()
+                connection.close()
+            except sqlite3.OperationalError:
+                return app.response_class(
+                    response=json.dumps({"result": "DB error"}),
+                    status=500,
+                    mimetype="application/json",
+                )
 
             app.logger.info(f"[{get_current_ts()}] A new article \"{title}\" is created successfully!")
 
